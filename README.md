@@ -34,7 +34,7 @@ for credentials is flagged the moment it appears.
 ## Install
 
 ```sh
-git clone https://github.com/<you>/macos-prompt-verify
+git clone https://github.com/williamcolegithub/macos-prompt-verify
 cd macos-prompt-verify
 swiftc -O src/alert.swift -o bin/pv-alert     # optional, see below
 ./bin/prompt-verify setup                     # choose your word
