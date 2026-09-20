@@ -1,0 +1,3 @@
+bin/pv-alert
+*.o
+.DS_Store

@@ -1,0 +1,265 @@
+#!/bin/bash
+#
+# prompt-verify — tells you whether a macOS password dialog is genuine.
+#
+# A fake password dialog can be pixel-perfect. What it cannot do is start
+# SecurityAgent, the root process macOS uses to draw real authorization
+# prompts, and it cannot know a word you chose yourself.
+#
+# So every real prompt is announced with your word. A password dialog that
+# appears without it did not come from macOS.
+#
+# Usage:
+#   prompt-verify setup     choose your word and test the alert
+#   prompt-verify watch     run the watcher (normally started by launchd)
+#   prompt-verify check     is the dialog on screen right now genuine?
+#   prompt-verify install   run the watcher at login
+#   prompt-verify uninstall stop and remove the watcher
+#   prompt-verify status    show current state
+
+set -uo pipefail
+
+SERVICE="prompt-verify"
+LABEL="org.promptverify.watch"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+LOGDIR="${PROMPT_VERIFY_HOME:-$HOME/.prompt-verify}"
+LOG="$LOGDIR/events.log"
+SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+mkdir -p "$LOGDIR"
+
+# --- token -------------------------------------------------------------
+# Kept in the login keychain rather than a file. This is not airtight --
+# see the threat model in the README -- but it means reading it is an
+# access a curious process has to actually request.
+
+token_get() {
+    security find-generic-password -a "$USER" -s "$SERVICE" -w 2>/dev/null
+}
+
+token_set() {
+    security add-generic-password -a "$USER" -s "$SERVICE" -w "$1" -U 2>/dev/null
+}
+
+token_clear() {
+    security delete-generic-password -a "$USER" -s "$SERVICE" >/dev/null 2>&1
+}
+
+# --- helpers -----------------------------------------------------------
+
+log_event() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; }
+
+# The process macOS uses to draw genuine authorization prompts. An
+# application cannot start it or pretend to be it.
+security_agent_pid() {
+    pgrep -x SecurityAgent 2>/dev/null | head -1
+}
+
+frontmost_app() {
+    osascript -e 'tell application "System Events" to get name of first process whose frontmost is true' 2>/dev/null
+}
+
+# Scripted credential dialogs are the common way fakes are drawn: osascript
+# with a hidden answer field. This catches that specific, popular technique.
+# It does not catch a dialog drawn by compiled code.
+scripted_dialog_pids() {
+    # Only the interpreter process itself, never the shell that launched it,
+    # and never this script. Matching a wrapper would name the wrong culprit
+    # and would let prompt-verify flag itself.
+    ps -axo pid=,comm=,command= 2>/dev/null \
+        | awk '$2 ~ /osascript$/' \
+        | grep -iE "display (dialog|alert)" \
+        | grep -iE "hidden answer|password|passphrase|credential|keychain|unlock" \
+        | grep -v "prompt-verify" \
+        | awk '{print $1}'
+}
+
+is_loaded() {
+    launchctl list 2>/dev/null | grep -q "$LABEL" \
+        || launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q "state = running"
+}
+
+notify() {  # title, message
+    osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1
+}
+
+alarm() {   # title, message -- cuts through Focus, unlike a notification
+    afplay /System/Library/Sounds/Basso.aiff >/dev/null 2>&1 &
+    # A warning that opens on a second monitor is a warning you do not see, so
+    # prefer the helper that pins it to the built-in display. Fall back to
+    # AppleScript if the helper was not built.
+    local helper="$(dirname "$SELF")/pv-alert"
+    if [ -x "$helper" ]; then
+        "$helper" "$1" "$2" 30 >/dev/null 2>&1 &
+    else
+        osascript -e "display alert \"$1\" message \"$2\" as critical giving up after 30" >/dev/null 2>&1 &
+    fi
+}
+
+# --- commands ----------------------------------------------------------
+
+cmd_setup() {
+    echo "Choose a word or short phrase you will recognise."
+    echo "It is shown with every genuine password prompt."
+    echo "Pick something you would notice the absence of."
+    echo
+    printf 'Your word: '
+    read -r word
+    [ -z "$word" ] && { echo "Nothing entered. Cancelled."; exit 1; }
+
+    token_set "$word" || { echo "Could not write to the keychain."; exit 1; }
+    echo
+    echo "Saved. Here is what a genuine prompt will look like:"
+    sleep 1
+    notify "Genuine system prompt — $word" "Requested by: Installer"
+    alarm "Genuine system prompt" "Verification: $word
+
+Requested while in: Installer
+
+If this word is wrong or missing, the dialog asking for your password is NOT from macOS."
+    echo
+    echo "If you did not see that, notifications may be off, or Focus is on."
+    echo "Run 'prompt-verify status' to check."
+    echo
+    echo "From now on: no word, no password."
+}
+
+cmd_watch() {
+    local token last_agent="" last_script=""
+    token="$(token_get)"
+    [ -z "$token" ] && { echo "No word set. Run: prompt-verify setup" >&2; exit 1; }
+    log_event "watcher started"
+
+    while true; do
+        # A genuine prompt appeared.
+        local pid; pid="$(security_agent_pid)"
+        if [ -n "$pid" ] && [ "$pid" != "$last_agent" ]; then
+            last_agent="$pid"
+            local front; front="$(frontmost_app)"
+            log_event "GENUINE prompt (pid $pid) frontmost=${front:-unknown}"
+            alarm "Genuine system prompt" "Verification: $token
+
+Requested while in: ${front:-unknown}
+
+If you did not expect this, cancel it."
+        elif [ -z "$pid" ]; then
+            last_agent=""
+        fi
+
+        # A scripted credential dialog appeared. This is the fake.
+        local spids; spids="$(scripted_dialog_pids)"
+        if [ -n "$spids" ] && [ "$spids" != "$last_script" ]; then
+            last_script="$spids"
+            local owner; owner="$(ps -o command= -p "$(echo "$spids" | head -1)" 2>/dev/null | cut -c1-120)"
+            log_event "SUSPICIOUS scripted dialog: $owner"
+            alarm "Do not type your password" "A script is drawing a password dialog.
+
+This is not a macOS prompt. Close it.
+
+$owner"
+        elif [ -z "$spids" ]; then
+            last_script=""
+        fi
+
+        sleep 1
+    done
+}
+
+cmd_check() {
+    local token pid spids
+    token="$(token_get)"
+    pid="$(security_agent_pid)"
+    spids="$(scripted_dialog_pids)"
+
+    if [ -n "$spids" ]; then
+        echo "FAKE — a script is drawing a password dialog right now."
+        ps -o pid=,command= -p "$(echo "$spids" | head -1)" 2>/dev/null | cut -c1-140
+        echo
+        echo "Do not type your password. Close the dialog."
+        exit 2
+    fi
+
+    if [ -n "$pid" ]; then
+        echo "GENUINE — SecurityAgent is running (pid $pid)."
+        [ -n "$token" ] && echo "Your word: $token"
+        echo "Frontmost application: $(frontmost_app)"
+        exit 0
+    fi
+
+    echo "NO GENUINE PROMPT ACTIVE."
+    echo
+    echo "If a password dialog is on screen right now, macOS did not draw it."
+    echo "Do not type your password."
+    exit 1
+}
+
+cmd_install() {
+    [ -z "$(token_get)" ] && { echo "Run 'prompt-verify setup' first."; exit 1; }
+
+    # launchd cannot execute anything inside ~/Documents or ~/Desktop -- those
+    # folders are protected, and a job pointed at them exits 126 with no
+    # explanation. Install a copy somewhere launchd can actually reach.
+    local runner="$LOGDIR/bin/prompt-verify"
+    mkdir -p "$LOGDIR/bin"
+    if [ "$SELF" != "$runner" ]; then
+        cp "$SELF" "$runner" && chmod +x "$runner"
+        [ -x "$(dirname "$SELF")/pv-alert" ] && cp "$(dirname "$SELF")/pv-alert" "$LOGDIR/bin/" 2>/dev/null
+        echo "Installed a copy at $runner"
+        echo "(launchd cannot run scripts from protected folders such as ~/Documents.)"
+    fi
+
+    cat > "$PLIST" <<PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array><string>$runner</string><string>watch</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+</dict>
+</plist>
+PLISTEOF
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null
+    # launchd registers asynchronously, and bootout of a previous copy can
+    # still be settling, so poll rather than check once.
+    local i=0
+    while [ $i -lt 15 ]; do
+        is_loaded && break
+        sleep 1; i=$((i+1))
+    done
+    if is_loaded; then
+        echo "Installed. The watcher runs at login."
+    else
+        echo "Could not start the watcher." >&2; exit 1
+    fi
+}
+
+cmd_uninstall() {
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
+    rm -f "$PLIST"
+    token_clear
+    echo "Removed. Your word has been deleted from the keychain."
+}
+
+cmd_status() {
+    local token; token="$(token_get)"
+    echo "Word set:     $([ -n "$token" ] && echo "yes" || echo "no — run setup")"
+    echo "Watcher:      $(is_loaded && echo running || echo "not running")"
+    echo "Prompt now:   $([ -n "$(security_agent_pid)" ] && echo "genuine prompt on screen" || echo none)"
+    echo "Log:          $LOG"
+    [ -f "$LOG" ] && { echo; echo "Recent:"; tail -5 "$LOG" | sed 's/^/  /'; }
+}
+
+case "${1:-}" in
+    setup)      cmd_setup ;;
+    watch)      cmd_watch ;;
+    check)      cmd_check ;;
+    install)    cmd_install ;;
+    uninstall)  cmd_uninstall ;;
+    status)     cmd_status ;;
+    *)          sed -n '3,20p' "$SELF" | sed 's/^# \{0,1\}//' ; exit 1 ;;
+esac
