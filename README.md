@@ -9,6 +9,11 @@ exactly like the system's own. It is a well documented technique: a few lines
 of AppleScript produce a window with a hidden text field, the right wording and
 the right icon, and whatever you type goes straight to the attacker.
 
+![A spoofed password dialog](docs/the-attack.png)
+
+That dialog is fake. It was produced by a single line of AppleScript, and
+anything typed into it is handed to whoever ran the script.
+
 Advice usually amounts to "look carefully." That does not work. A copy can be
 pixel-perfect, and you are asked to spot the difference while distracted.
 
@@ -64,25 +69,11 @@ it can be used from other scripts.
 **A genuine prompt** produces an alert on your built-in display containing your
 word and the application that was in front when it appeared:
 
-```
-Genuine system prompt
+![Alert confirming a genuine prompt](docs/genuine-prompt.png)
 
-Verification: <your word>
-Requested while in: Installer
+**A scripted fake** produces a different alert naming the process that drew it:
 
-If you did not expect this, cancel it.
-```
-
-**A scripted fake** produces a different alert naming the process:
-
-```
-Do not type your password
-
-A script is drawing a password dialog.
-This is not a macOS prompt. Close it.
-
-osascript -e display dialog "Software Update requires your password." ...
-```
+![Alert warning about a fake prompt](docs/fake-detected.png)
 
 Everything is logged to `~/.prompt-verify/events.log` whether or not you saw
 the alert.
