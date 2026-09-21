@@ -75,8 +75,14 @@ scripted_dialog_pids() {
 }
 
 is_loaded() {
-    launchctl list 2>/dev/null | grep -q "$LABEL" \
-        || launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q "state = running"
+    # Capture first: "launchctl ... | grep -q" fails under pipefail, because
+    # grep exits at the first match and launchctl dies of a broken pipe.
+    local listed printed
+    listed="$(launchctl list 2>/dev/null)"
+    case "$listed" in *"$LABEL"*) return 0 ;; esac
+    printed="$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null)"
+    case "$printed" in *"state = running"*) return 0 ;; esac
+    return 1
 }
 
 notify() {  # title, message
