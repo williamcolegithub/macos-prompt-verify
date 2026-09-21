@@ -49,10 +49,13 @@ token_clear() {
 
 log_event() { printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG"; }
 
-# The process macOS uses to draw genuine authorization prompts. An
-# application cannot start it or pretend to be it.
+# The processes macOS uses to draw genuine password prompts. An application
+# cannot start them or pretend to be them. Installers and most system requests
+# go through SecurityAgent. System Settings asks the LocalAuthentication
+# service instead (found by watching the "Privacy & Security" prompt), so both
+# have to be watched or that prompt arrives without your word.
 security_agent_pid() {
-    pgrep -x SecurityAgent 2>/dev/null | head -1
+    { pgrep -x SecurityAgent; pgrep -f "LocalAuthenticationRemoteService.xpc"; } 2>/dev/null | head -1
 }
 
 frontmost_app() {

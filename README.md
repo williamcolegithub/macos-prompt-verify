@@ -21,8 +21,9 @@ pixel-perfect, and you are asked to spot the difference while distracted.
 
 Stop trying to recognise the fake. Confirm the real one instead.
 
-Genuine authorization prompts are drawn by `SecurityAgent`, a root process that
-an application cannot start or impersonate. Whenever it appears, prompt-verify
+Genuine authorization prompts are drawn by system processes (`SecurityAgent`,
+and the LocalAuthentication service for System Settings) that an application
+cannot start or impersonate. Whenever it appears, prompt-verify
 shows an alert containing **a word you chose during setup**.
 
 An attacker can copy the dialog. They cannot produce your word.
